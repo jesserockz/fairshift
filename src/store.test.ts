@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { Store, seedState, defaultState, LS_KEY } from "./store";
+import { Store, seedState, defaultState, uniqueTeamName, LS_KEY } from "./store";
 import type { GameConfig } from "./types";
 
 const cfg: GameConfig = {
@@ -335,5 +335,51 @@ describe("planning & live game", () => {
     store.replaceState(seedState());
     store.wipe();
     expect(store.currentTeam()!.players).toHaveLength(0);
+  });
+});
+
+describe("addSharedTeam", () => {
+  const shared = {
+    name: "Foxes",
+    positions: [
+      { name: "GK", cadence: "shift" as const, isGoalkeeper: true },
+      { name: "Def", cadence: "half" as const, isGoalkeeper: false },
+    ],
+    players: [
+      { name: "Ava", positions: [1, 0] },
+      { name: "Ben", positions: [] },
+    ],
+  };
+
+  it("adds a NEW team with fresh ids, all present, and selects it", () => {
+    const store = new Store();
+    const before = store.state.teams.length;
+    const mine = store.state.teams[0];
+    const t = store.addSharedTeam(shared);
+    expect(store.state.teams).toHaveLength(before + 1);
+    expect(store.state.teams[0]).toBe(mine);
+    expect(store.state.currentTeamId).toBe(t.id);
+    expect(t.players.every((p) => p.present)).toBe(true);
+    const [gk, def] = t.positions;
+    expect(gk).toMatchObject({ name: "GK", cadence: "shift", isGoalkeeper: true });
+    expect(t.players[0].positionIds).toEqual([def.id, gk.id]);
+    const ids = [t.id, ...t.positions.map((p) => p.id), ...t.players.map((p) => p.id)];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Store().state.teams.map((x) => x.name)).toContain("Foxes"); // persisted
+  });
+
+  it("suffixes duplicate team names", () => {
+    const store = new Store();
+    expect(store.addSharedTeam(shared).name).toBe("Foxes");
+    expect(store.addSharedTeam(shared).name).toBe("Foxes (2)");
+    expect(store.addSharedTeam(shared).name).toBe("Foxes (3)");
+  });
+});
+
+describe("uniqueTeamName", () => {
+  it("returns the name unchanged when free, else the first free suffix", () => {
+    expect(uniqueTeamName("A", [])).toBe("A");
+    expect(uniqueTeamName("A", ["a "])).toBe("A (2)");
+    expect(uniqueTeamName("A", ["A", "A (2)", "A (4)"])).toBe("A (3)");
   });
 });

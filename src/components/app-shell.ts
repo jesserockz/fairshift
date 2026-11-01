@@ -1,4 +1,5 @@
 import { store } from "../store";
+import { checkTeamHash } from "./share-ui";
 import type { Tab } from "./base";
 
 const TABS: { id: Tab; label: string }[] = [
@@ -19,7 +20,18 @@ export class AppShell extends HTMLElement {
       this.applyTab();
     });
     store.onSaved(() => this.flashSaved());
+    // Shared-team links arrive as #team=...; tabs are in-memory only, so no clash.
+    window.addEventListener("hashchange", this.onHashChange);
+    void checkTeamHash();
   }
+
+  disconnectedCallback(): void {
+    window.removeEventListener("hashchange", this.onHashChange);
+  }
+
+  private onHashChange = (): void => {
+    void checkTeamHash();
+  };
 
   private render(): void {
     this.innerHTML = `

@@ -2,6 +2,7 @@ import { View } from "./base";
 import { store } from "../store";
 import { clampNum, esc, fmtClock, fmtMin } from "../format";
 import { toast } from "./ui";
+import { openShareModal } from "./share-ui";
 import { suggestShift } from "../suggest";
 import type { GameConfig, Position, PositionCadence } from "../types";
 
@@ -84,6 +85,7 @@ export class SetupView extends View {
         <div class="row">
           <select id="teamSelect" style="width:auto">${teamOptions}</select>
           <button class="sm" id="btnNewTeam">New</button>
+          <button class="sm" id="btnShareTeam">Share team</button>
           <button class="sm danger" id="btnDelTeam">Delete</button>
         </div>
       </div>
@@ -209,6 +211,10 @@ export class SetupView extends View {
     this.querySelector<HTMLButtonElement>("#btnNewTeam")!.onclick = () => {
       const name = prompt("New team name", "New Team");
       if (name !== null) store.newTeam(name);
+    };
+    this.querySelector<HTMLButtonElement>("#btnShareTeam")!.onclick = () => {
+      const t = store.currentTeam();
+      if (t) void openShareModal(t);
     };
     this.querySelector<HTMLButtonElement>("#btnDelTeam")!.onclick = () => {
       const t = store.currentTeam();

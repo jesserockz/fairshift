@@ -133,3 +133,13 @@ export interface AppState {
   live: LiveGame | null;
   games: FinishedGame[];
 }
+
+/**
+ * A team as carried in a share link: no ids, no `present` flag, no history.
+ * Players reference positions by index into `positions`.
+ */
+export interface SharedTeam {
+  name: string;
+  positions: { name: string; cadence: PositionCadence; isGoalkeeper: boolean }[];
+  players: { name: string; positions: number[] }[];
+}

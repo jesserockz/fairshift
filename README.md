@@ -34,6 +34,7 @@ npm run coverage   # unit suite + coverage report
 - **Live game mode** - a big **next-sub countdown** with a progress bar leads the screen, above explicit **"off → on" pairing rows** so it is unambiguous who replaces whom (the keeper handover is called out with a "GK" tag). A buzzer/vibration fires at each shift change, players about to come off are flagged on the court, and the countdown turns amber in the final seconds. **Tap any on-court player to drop them straight into a position** (e.g. put the player coming on into goal) - the override sticks for the shift and flows through to goals-conceded stats. Survives a page refresh - an in-progress game is saved continuously.
 - **Goals** - one tap per team; pick the scorer for your goals. Goals against are tagged with the keeper on court at the time.
 - **History and stats** - every finished game is stored forever, with per-player minutes, goals, keeper minutes and goals-conceded-as-keeper aggregated across all games.
+- **Share a team** - "Share team" shows a QR code and a link holding the team name, positions and players (not game history). Opening the link on another device offers to add it as a new team. The data lives in the URL fragment, so it never goes to a server.
 - **Export / import** - back up or move data as JSON, or export goals as CSV for a spreadsheet.
 
 ## First use case: kids floorball
@@ -52,6 +53,7 @@ src/
   suggest.ts      fairest sub-interval suggester (pure)
   game.ts         live-clock helpers (pure)
   stats.ts        aggregation + CSV export (pure)
+  share.ts        team share links: encode/decode/validate + QR (pure)
   store.ts        state + localStorage persistence + all domain actions
   pwa.ts          service-worker registration + update-prompt bar
   components/      custom elements (app shell + setup/schedule/live/history views)

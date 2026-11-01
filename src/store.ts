@@ -7,6 +7,7 @@ import type {
   Player,
   Position,
   PositionCadence,
+  SharedTeam,
   Team,
 } from "./types";
 import { uid, todayStr } from "./format";
@@ -33,6 +34,14 @@ export function seedState(): AppState {
   s.teams.push(t);
   s.currentTeamId = t.id;
   return s;
+}
+
+/** `name`, or `name (2)`, `name (3)`... - the first not already used (case-insensitive). */
+export function uniqueTeamName(name: string, existing: string[]): string {
+  const taken = new Set(existing.map((n) => n.trim().toLowerCase()));
+  let candidate = name;
+  for (let n = 2; taken.has(candidate.toLowerCase()); n++) candidate = `${name} (${n})`;
+  return candidate;
 }
 
 type Listener = () => void;
@@ -138,6 +147,30 @@ export class Store {
       s.teams.push(t);
       s.currentTeamId = t.id;
     });
+  }
+
+  /** Add a team received via a share link as a NEW team and select it. */
+  addSharedTeam(shared: SharedTeam): Team {
+    const positions: Position[] = shared.positions.map((p) => ({ id: uid(), ...p }));
+    const t: Team = {
+      id: uid(),
+      name: uniqueTeamName(
+        shared.name,
+        this.state.teams.map((x) => x.name),
+      ),
+      positions,
+      players: shared.players.map((p) => ({
+        id: uid(),
+        name: p.name,
+        present: true,
+        positionIds: p.positions.map((i) => positions[i].id),
+      })),
+    };
+    this.update((s) => {
+      s.teams.push(t);
+      s.currentTeamId = t.id;
+    });
+    return t;
   }
 
   renameTeam(name: string): void {
