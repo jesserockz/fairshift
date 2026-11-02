@@ -42,6 +42,12 @@ export interface GameConfig {
   // Max players swapped on/off court at each shift change. 0 = auto (change
   // whoever fairness dictates); >=1 = rolling subs of at most that many at once.
   maxSwaps?: number;
+  // Timer per player: no synchronized shifts. `shiftLength` becomes each
+  // player's stint on court, and subs are made one player at a time.
+  perPlayer?: boolean;
+  // Timer-per-player: minutes before the first sub can come due. 0 / unset =
+  // automatic (1/n of the stint, so subs come one at a time from the start).
+  firstStint?: number;
 }
 
 /** A player as captured into a plan/game (roster snapshot). */
@@ -60,6 +66,8 @@ export interface Shift {
   onIds: string[];
   restingIds: string[];
   assignments: Record<string, string>; // positionId -> playerId on this shift
+  carry?: boolean; // resumes the previous shift's line-up after the half break
+  carryOverSec?: number; // time of this shift still owed after the half break
 }
 
 export interface PlayerTotals {
@@ -102,6 +110,12 @@ export interface GameEvent {
   at: string; // ISO timestamp
 }
 
+/** Court time a player has actually banked in a live game. */
+export interface PlayedTime {
+  fieldSec: number;
+  posSec: Record<string, number>; // positionId -> seconds held
+}
+
 /** A game in progress. Persisted so a refresh never loses data. */
 export interface LiveGame {
   id: string;
@@ -119,6 +133,14 @@ export interface LiveGame {
   running: boolean;
   manualShift: number;
   events: GameEvent[];
+  // Court time actually played, per player (ticked live). Absent on games saved
+  // before it existed; treated as zero.
+  played?: Record<string, PlayedTime>;
+  // Per-player mode: seconds each player has spent in their current state
+  // (on court, or on the bench) since their last sub.
+  timers?: Record<string, number>;
+  // JSON snapshot taken just before the last confirmed sub, for "Undo sub".
+  undoSub?: string;
 }
 
 export interface FinishedGame extends LiveGame {

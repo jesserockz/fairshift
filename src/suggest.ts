@@ -1,18 +1,19 @@
+import { buildSchedule } from "./rotation";
+import type { SchedulePlayer } from "./types";
+
 /**
  * Suggest the fairest sub interval for a given squad.
  *
  * Court time is fairest when the total number of player-slots (players on court
- * summed over every shift) divides evenly among the present players. We search
- * every sub interval on a 30-second grid, compute the resulting court-time
- * spread, and pick the interval that is as fair as possible while keeping the
- * cadence comfortable (near ~2.5 min) rather than chasing tiny, chaotic shifts.
- *
- * Only intervals reachable on the 30s grid are considered, and the engine's own
- * rounding (`round(halfLength / interval)` shifts per half) is modelled exactly,
- * so the reported fairness is what the schedule will actually produce.
+ * summed over every shift) divides evenly among the present players. We try
+ * every sub interval on a 10-second grid (30 seconds up), build the real rotation for each
+ * (shifts run for exactly the interval, with a shorter one wherever a half or
+ * the game ends) and read off the resulting court-time spread, then pick the
+ * interval that is as fair as possible while keeping the cadence comfortable
+ * (near ~2.5 min) rather than chasing tiny, chaotic shifts.
  */
 export interface ShiftSuggestion {
-  shiftLength: number; // minutes, on the 0.5 grid, to drop into the config
+  shiftLength: number; // minutes, on the 10s grid, to drop into the config
   shiftsPerHalf: number;
   perfectlyFair: boolean;
   minCourtSec: number;
@@ -21,13 +22,12 @@ export interface ShiftSuggestion {
   noSubsNeeded: boolean; // present <= court size: everyone plays the whole game
 }
 
+const GRID_SEC = 10;
 const TARGET_MIN = 2.5; // comfortable sub cadence
 const TOLERANCE_SEC = 60; // treat intervals within a minute of the fairest as tied
 
 interface Candidate {
   s: number;
-  k: number;
-  shiftMin: number;
   spread: number;
   minSec: number;
   maxSec: number;
@@ -47,18 +47,33 @@ export function suggestShift(
 
   const gameSec = halves * L * 60;
   const fairShareSec = (f * gameSec) / n;
+  const squad: SchedulePlayer[] = Array.from({ length: n }, (_, i) => ({
+    id: "p" + i,
+    name: "P" + i,
+    positionIds: [],
+  }));
 
   const cands: Candidate[] = [];
-  for (let i = 1; i * 0.5 <= L + 1e-9; i++) {
-    const s = i * 0.5; // candidate interval on the 30s grid
-    const k = Math.max(1, Math.round(L / s)); // shifts per half the engine will use
-    const shiftMin = L / k;
-    const slots = f * halves * k;
-    const base = Math.floor(slots / n);
-    const rem = slots % n;
-    const minSec = Math.round(base * shiftMin * 60);
-    const maxSec = Math.round((rem > 0 ? base + 1 : base) * shiftMin * 60);
-    cands.push({ s, k, shiftMin, spread: maxSec - minSec, minSec, maxSec, perfect: rem === 0 });
+  for (let sec = 30; sec <= halves * L * 60 + 1e-9; sec += GRID_SEC) {
+    const s = sec / 60; // candidate interval on the 10s grid (never under 30s)
+    const sch = buildSchedule(squad, [], {
+      fieldSize: f,
+      halves,
+      halfLength: L,
+      shiftLength: s,
+      opponent: "",
+      seed: 0,
+    });
+    const fields = sch.totals.map((t) => t.fieldSec);
+    const minSec = Math.min(...fields);
+    const maxSec = Math.max(...fields);
+    cands.push({
+      s,
+      spread: maxSec - minSec,
+      minSec,
+      maxSec,
+      perfect: maxSec - minSec <= 1,
+    });
   }
 
   const minSpread = Math.min(...cands.map((c) => c.spread));
@@ -66,14 +81,14 @@ export function suggestShift(
     .filter((c) => c.spread <= minSpread + TOLERANCE_SEC)
     .sort(
       (a, b) =>
-        Math.abs(a.shiftMin - TARGET_MIN) - Math.abs(b.shiftMin - TARGET_MIN) ||
-        Math.abs(a.s - a.shiftMin) - Math.abs(b.s - b.shiftMin) || // honest display value
-        b.shiftMin - a.shiftMin, // prefer fewer subs on a tie
+        Number(!a.perfect) - Number(!b.perfect) || // a perfectly even split wins a tie
+        Math.round(Math.abs(a.s - TARGET_MIN) * 60) - Math.round(Math.abs(b.s - TARGET_MIN) * 60) ||
+        b.s - a.s, // prefer fewer subs on a tie
     )[0];
 
   return {
     shiftLength: best.s,
-    shiftsPerHalf: best.k,
+    shiftsPerHalf: Math.ceil((L * 60) / (best.s * 60)),
     perfectlyFair: best.perfect,
     minCourtSec: best.minSec,
     maxCourtSec: best.maxSec,

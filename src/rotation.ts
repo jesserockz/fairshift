@@ -7,12 +7,107 @@ import type {
   Shift,
 } from "./types";
 
-interface Skeleton {
+export interface Skeleton {
   idx: number;
   half: number;
   startSec: number;
   endSec: number;
   dur: number;
+  carry?: boolean; // continues the previous shift's line-up after the half break
+  carryOverSec?: number; // time of this shift still to play after the half break
+}
+
+/** Seconds per shift, as set (never less than 30). */
+export function shiftSeconds(cfg: GameConfig): number {
+  return Math.max(30, Math.round(cfg.shiftLength * 60));
+}
+
+/**
+ * Lay out shifts of exactly the set length, back to back, from `atSec` into
+ * `half` to the end of the game. Nothing is stretched to fit: a shift that
+ * would run past the end of a half is cut there and its remainder resumes at
+ * the start of the next half (same line-up), and the final shift of the game
+ * is simply whatever is left. `carrySec` is how much of an already running
+ * shift is still owed at the start of the next half.
+ */
+export function planTimeline(
+  cfg: GameConfig,
+  firstIdx: number,
+  half: number,
+  atSec: number,
+  carrySec = 0,
+): Skeleton[] {
+  const halfSec = cfg.halfLength * 60;
+  const full = shiftSeconds(cfg);
+  const out: Skeleton[] = [];
+  let idx = firstIdx;
+  let t = atSec;
+  let owed = carrySec > 0 ? carrySec : full; // time left in the running shift
+  let carry = carrySec > 0;
+  for (let h = half; h < cfg.halves; h++) {
+    while (t < halfSec - 1e-6) {
+      const dur = Math.min(owed, halfSec - t);
+      const sk: Skeleton = {
+        idx: idx++,
+        half: h,
+        startSec: Math.round(t),
+        endSec: Math.round(t + dur),
+        dur,
+      };
+      if (carry) sk.carry = true;
+      owed -= dur;
+      t += dur;
+      if (owed > 1e-6) {
+        if (h + 1 < cfg.halves) sk.carryOverSec = owed; // resumes after the break
+        carry = true;
+      } else {
+        owed = full;
+        carry = false;
+      }
+      out.push(sk);
+    }
+    t = 0;
+  }
+  return out;
+}
+
+/**
+ * Plan for a game with a timer per player: no shift grid, just the starting
+ * line-up (one shift per half, only the first of which is used live) and an
+ * even fair-share estimate, since who comes on next is decided as the game goes.
+ */
+export function buildStintPlan(
+  players: SchedulePlayer[],
+  positions: Position[],
+  cfg: GameConfig,
+): Schedule {
+  const base = buildSchedule(players, positions, {
+    ...cfg,
+    shiftLength: cfg.halfLength,
+    maxSwaps: 0,
+  });
+  const gameSec = cfg.halves * cfg.halfLength * 60;
+  const fieldSec = Math.round((base.fieldSize * gameSec) / players.length);
+  const totals = players.map((p) => ({
+    id: p.id,
+    name: p.name,
+    fieldSec,
+    posSec: {},
+    gameSec,
+    restSec: gameSec - fieldSec,
+  }));
+  return { ...base, totals };
+}
+
+/**
+ * Mid-game state to carry into a rebuild: the shifts still to be planned, what
+ * has actually been played so far, and the shift they follow on from.
+ */
+export interface ResumeSeed {
+  skeleton: Skeleton[]; // the remaining shifts to plan (replaces the default grid)
+  fieldSec: Record<string, number>; // court seconds already banked (or committed)
+  posSec: Record<string, Record<string, number>>; // per-position seconds, likewise
+  prev: { idx: number; half: number; onIds: string[]; assignments: Record<string, string> };
 }
 
 const CADENCE_ORDER: Record<Position["cadence"], number> = {
@@ -66,11 +161,17 @@ function shuffledRanks(
  *
  * `cfg.seed` rotates equal-time tie-breaks so "Reshuffle" varies who gets the
  * unavoidable extra shift or role stint.
+ *
+ * With `resume`, only the remaining shifts are planned, starting from the given
+ * court and counting the time already played, so a live game can be re-balanced
+ * after subs ran late. Resumed plans always use the time-aware rolling pick
+ * (never the fixed conveyor), since actual time no longer follows a fixed order.
  */
 export function buildSchedule(
   players: SchedulePlayer[],
   positions: Position[],
   cfg: GameConfig,
+  resume?: ResumeSeed,
 ): Schedule {
   const f = Math.min(cfg.fieldSize, players.length);
 
@@ -78,36 +179,28 @@ export function buildSchedule(
   const lastOn: Record<string, number> = {};
   const posTime: Record<string, Record<string, number>> = {};
   players.forEach((p) => {
-    field[p.id] = 0;
-    lastOn[p.id] = -999;
+    field[p.id] = resume?.fieldSec[p.id] ?? 0;
+    lastOn[p.id] = resume?.prev.onIds.includes(p.id) ? resume.prev.idx : -999;
     posTime[p.id] = {};
-    positions.forEach((pos) => (posTime[p.id][pos.id] = 0));
+    positions.forEach((pos) => (posTime[p.id][pos.id] = resume?.posSec[p.id]?.[pos.id] ?? 0));
   });
+  const startField: Record<string, number> = { ...field };
 
   const rank = shuffledRanks(players, cfg.seed || 0);
 
   // Time skeleton: shift boundaries per half.
   const skeleton: Skeleton[] = [];
   const lastIdxOfHalf: number[] = [];
-  const shiftLenSec = Math.max(30, cfg.shiftLength * 60);
-  let idx = 0;
-  for (let h = 0; h < cfg.halves; h++) {
-    const halfSec = cfg.halfLength * 60;
-    const nShifts = Math.max(1, Math.round(halfSec / shiftLenSec));
-    const seg = halfSec / nShifts;
-    for (let s = 0; s < nShifts; s++) {
-      skeleton.push({
-        idx,
-        half: h,
-        startSec: Math.round(s * seg),
-        endSec: Math.round((s + 1) * seg),
-        dur: seg,
-      });
-      idx++;
-    }
-    lastIdxOfHalf[h] = idx - 1;
+  if (resume) {
+    skeleton.push(...resume.skeleton);
+    resume.skeleton.forEach((sk) => (lastIdxOfHalf[sk.half] = sk.idx));
+  } else {
+    skeleton.push(...planTimeline(cfg, 0, 0, 0));
+    skeleton.forEach((sk) => (lastIdxOfHalf[sk.half] = sk.idx));
   }
-  const lastIdx = idx - 1;
+  const lastIdx = resume
+    ? Math.max(resume.prev.idx, ...resume.skeleton.map((sk) => sk.idx))
+    : skeleton.length - 1;
 
   // Longer-cadence roles claim players first so shorter ones fill around them.
   const posOrder = positions
@@ -122,6 +215,11 @@ export function buildSchedule(
     );
   });
 
+  const carryFields = (sk: Skeleton): Pick<Shift, "carry" | "carryOverSec"> => ({
+    ...(sk.carry ? { carry: true } : {}),
+    ...(sk.carryOverSec ? { carryOverSec: sk.carryOverSec } : {}),
+  });
+
   const holders: Record<string, { playerId: string; endIdx: number }> = {};
   const shifts: Shift[] = [];
   const endIdxFor = (pos: Position, sk: Skeleton): number =>
@@ -130,6 +228,21 @@ export function buildSchedule(
       : pos.cadence === "half"
         ? lastIdxOfHalf[sk.half]
         : lastIdx;
+
+  // Resuming: whoever holds a half/game role now keeps it for the rest of its tenure.
+  if (resume) {
+    for (const pos of positions) {
+      const pid = resume.prev.assignments[pos.id];
+      if (!pid || pos.cadence === "shift") continue;
+      holders[pos.id] = {
+        playerId: pid,
+        endIdx:
+          pos.cadence === "game"
+            ? lastIdx
+            : (lastIdxOfHalf[resume.prev.half] ?? resume.prev.idx),
+      };
+    }
+  }
 
   // Assign each position to an on-court player (persistent holders kept while
   // their tenure lasts; otherwise the eligible on-court player with least time
@@ -180,6 +293,9 @@ export function buildSchedule(
       return { id: p.id, name: p.name, fieldSec, posSec, gameSec, restSec: gameSec - fieldSec };
     });
 
+  const skeletonDur: Record<number, number> = {};
+  skeleton.forEach((sk) => (skeletonDur[sk.idx] = sk.dur));
+
   const swapLimit = cfg.maxSwaps && cfg.maxSwaps >= 1 ? cfg.maxSwaps : 0;
 
   // A rolling game with only per-shift roles rotates as a clean circular
@@ -193,15 +309,17 @@ export function buildSchedule(
     players.every((p) => p.positionIds.includes(pos.id)),
   );
   const conveyor =
-    swapLimit >= 1 && allEligible && positions.every((p) => p.cadence === "shift");
+    !resume && swapLimit >= 1 && allEligible && positions.every((p) => p.cadence === "shift");
   if (conveyor) {
     const orderIds = [...players]
       .sort((a, b) => rank[a.id] - rank[b.id])
       .map((p) => p.id);
     const nn = orderIds.length;
     const step = Math.min(swapLimit, nn - f); // never roll more than the bench
+    let slot = -1; // a resumed (carry) shift keeps the window where it was
     for (const sk of skeleton) {
-      const start = step > 0 ? (sk.idx * step) % nn : 0;
+      if (!sk.carry) slot++;
+      const start = step > 0 ? (slot * step) % nn : 0;
       const onIds: string[] = [];
       for (let i = 0; i < f; i++) onIds.push(orderIds[(start + i) % nn]);
       const onSet = new Set(onIds);
@@ -222,19 +340,32 @@ export function buildSchedule(
         onIds,
         restingIds: orderIds.filter((id) => !onSet.has(id)),
         assignments,
+        ...carryFields(sk),
       });
     }
     return { shifts, totals: buildTotals(), fieldSize: f, positions };
   }
 
-  let prevOn: Set<string> | null = null;
+  let prevOn: Set<string> | null = resume ? new Set(resume.prev.onIds) : null;
+  let prevAssignments: Record<string, string> = resume ? resume.prev.assignments : {};
 
   for (const sk of skeleton) {
     const pinned = new Set<string>();
     const assignments: Record<string, string> = {};
     let onIds: string[];
 
-    if (swapLimit && prevOn) {
+    if (sk.carry && prevOn) {
+      // ---- resuming a shift after the half break: same players stay on ----
+      onIds = [...prevOn];
+      for (const pos of posOrder) {
+        const h = holders[pos.id];
+        // a per-shift (or game-long) role stays with its holder for the whole shift
+        if (h && pos.cadence !== "half" && prevOn.has(h.playerId)) {
+          h.endIdx = Math.max(h.endIdx, sk.idx);
+        }
+      }
+      assignPositions(sk, prevOn, onIds, pinned, assignments);
+    } else if (swapLimit && prevOn) {
       // ---- rolling substitutions: change at most `swapLimit` players ----
       // players locked on court by an active half/game role
       const carry = new Set<string>();
@@ -251,9 +382,7 @@ export function buildSchedule(
       }
       // Players holding a role last shift (e.g. the keeper) come off last, so
       // the outfield rotates around them rather than pulling them first.
-      const heldPrev = new Set(
-        Object.values(shifts[shifts.length - 1].assignments),
-      );
+      const heldPrev = new Set(Object.values(prevAssignments));
       const on = new Set(prevOn);
       const comingOn = players
         .filter((p) => !on.has(p.id))
@@ -354,8 +483,10 @@ export function buildSchedule(
       onIds,
       restingIds,
       assignments,
+      ...carryFields(sk),
     });
     prevOn = new Set(onIds);
+    prevAssignments = assignments;
   }
 
   // Balance court time (non-rolling). The greedy pick plus pinning a keeper on
@@ -365,33 +496,46 @@ export function buildSchedule(
   // spread is at most a single shift. Roles are never moved. (Rolling games use
   // the conveyor above, or accept a small gap when a persistent role pins one.)
   if (!swapLimit) {
-    const durByIdx: Record<number, number> = {};
-    skeleton.forEach((sk) => (durByIdx[sk.idx] = sk.dur));
-    const slots: Record<string, number> = {};
-    players.forEach((p) => (slots[p.id] = 0));
-    shifts.forEach((sh) => sh.onIds.forEach((id) => slots[id]++));
-    const holdsRole = (sh: Shift, id: string): boolean =>
-      Object.values(sh.assignments).includes(id);
+    // A shift resumed after the half break is the same line-up as the one before
+    // it, so the two are balanced as a single block.
+    const groups: Shift[][] = [];
+    shifts.forEach((sh) => {
+      if (sh.carry && groups.length) groups[groups.length - 1].push(sh);
+      else groups.push([sh]);
+    });
+    const durOf = (g: Shift[]): number =>
+      g.reduce((a, sh) => a + skeletonDur[sh.idx], 0);
+    // Court seconds per player, starting from any time already banked. Compared
+    // with a small tolerance so float shift lengths behave like whole slots.
+    const eps = 1e-6;
+    const secs: Record<string, number> = { ...startField };
+    groups.forEach((g) => g[0].onIds.forEach((id) => (secs[id] += durOf(g))));
+    const maxDur = Math.max(0, ...groups.map(durOf));
+    const holdsRole = (g: Shift[], id: string): boolean =>
+      g.some((sh) => Object.values(sh.assignments).includes(id));
 
     const guard = players.length * shifts.length + 1;
     for (let iter = 0; iter < guard; iter++) {
       const ids = players.map((p) => p.id);
-      const hi = Math.max(...ids.map((id) => slots[id]));
-      const lo = Math.min(...ids.map((id) => slots[id]));
-      if (hi - lo <= 1) break;
+      const hi = Math.max(...ids.map((id) => secs[id]));
+      const lo = Math.min(...ids.map((id) => secs[id]));
+      if (hi - lo <= maxDur + eps) break;
       let swapped = false;
       for (const over of players) {
-        if (slots[over.id] !== hi) continue;
-        for (const sh of shifts) {
-          if (!sh.onIds.includes(over.id) || holdsRole(sh, over.id)) continue;
-          const under = sh.restingIds
-            .filter((id) => slots[id] < slots[over.id] - 1)
-            .sort((a, b) => slots[a] - slots[b])[0];
+        if (Math.abs(secs[over.id] - hi) > eps) continue;
+        for (const g of groups) {
+          if (!g[0].onIds.includes(over.id) || holdsRole(g, over.id)) continue;
+          const d = durOf(g);
+          const under = g[0].restingIds
+            .filter((id) => secs[over.id] - secs[id] > d + eps)
+            .sort((a, b) => secs[a] - secs[b])[0];
           if (under) {
-            sh.onIds = sh.onIds.filter((id) => id !== over.id).concat(under);
-            sh.restingIds = sh.restingIds.filter((id) => id !== under).concat(over.id);
-            slots[over.id]--;
-            slots[under]++;
+            g.forEach((sh) => {
+              sh.onIds = sh.onIds.filter((id) => id !== over.id).concat(under);
+              sh.restingIds = sh.restingIds.filter((id) => id !== under).concat(over.id);
+            });
+            secs[over.id] -= d;
+            secs[under] += d;
             swapped = true;
             break;
           }
@@ -400,8 +544,7 @@ export function buildSchedule(
       }
       if (!swapped) break;
     }
-    players.forEach((p) => (field[p.id] = 0));
-    shifts.forEach((sh) => sh.onIds.forEach((id) => (field[id] += durByIdx[sh.idx])));
+    players.forEach((p) => (field[p.id] = secs[p.id]));
   }
 
   return { shifts, totals: buildTotals(), fieldSize: f, positions };

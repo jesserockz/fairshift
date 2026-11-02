@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSchedule } from "./rotation";
+import { buildSchedule, planTimeline, shiftSeconds, type ResumeSeed, type Skeleton } from "./rotation";
 import type { GameConfig, Position, SchedulePlayer } from "./types";
 
 const cfg = (over: Partial<GameConfig> = {}): GameConfig => ({
@@ -208,8 +208,8 @@ describe("rolling substitutions (maxSwaps)", () => {
   it("evens rolling court time while keeping the subs-at-once limit", () => {
     const names = ["Ava", "Ben", "Cai", "Dan", "Eli", "Fin", "Gus"];
     const players = mkPlayers(names, Object.fromEntries(names.map((n) => [n, ["gk"]])));
-    // 7 players, 4 on court, 1.5-min shifts => 14 shifts, 56 slots, 8 each.
-    const s = buildSchedule(players, [gk], cfg({ shiftLength: 1.5, maxSwaps: 2 }));
+    // 7 players, 4 on court, 1.5-min shifts in 10:30 halves => 14 shifts, 56 slots, 8 each.
+    const s = buildSchedule(players, [gk], cfg({ halfLength: 10.5, shiftLength: 1.5, maxSwaps: 2 }));
     expect(new Set(s.totals.map((t) => t.fieldSec)).size).toBe(1);
     expect(diffs(s).every((d) => d <= 2)).toBe(true);
   });
@@ -217,7 +217,7 @@ describe("rolling substitutions (maxSwaps)", () => {
   it("rolls as a clean conveyor: front player off, keeper newest and never subbed", () => {
     const names = ["Ava", "Ben", "Cai", "Dan", "Eli", "Fin", "Gus"];
     const players = mkPlayers(names, Object.fromEntries(names.map((n) => [n, ["gk"]])));
-    const s = buildSchedule(players, [gk], cfg({ shiftLength: 1.5, maxSwaps: 1 }));
+    const s = buildSchedule(players, [gk], cfg({ halfLength: 10.5, shiftLength: 1.5, maxSwaps: 1 }));
     for (let i = 1; i < s.shifts.length; i++) {
       const prev = s.shifts[i - 1];
       const cur = s.shifts[i];
@@ -317,5 +317,266 @@ describe("rolling substitutions (maxSwaps)", () => {
     const keeper = half0[0].assignments.gk;
     expect(half0.every((sh) => sh.onIds.includes(keeper))).toBe(true);
     expect(half0.every((sh) => sh.assignments.gk === keeper)).toBe(true);
+  });
+});
+
+describe("buildSchedule resuming mid-game", () => {
+  const names = ["Ava", "Ben", "Cai", "Dan", "Eli", "Fin"];
+  const players = mkPlayers(names);
+  const sk = (idx: number, half: number, startSec: number, endSec: number): Skeleton => ({
+    idx,
+    half,
+    startSec,
+    endSec,
+    dur: endSec - startSec,
+  });
+  const seed = (over: Partial<ResumeSeed> = {}): ResumeSeed => ({
+    skeleton: [sk(1, 0, 150, 300), sk(2, 0, 300, 450), sk(3, 0, 450, 600)],
+    fieldSec: {},
+    posSec: {},
+    prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: {} },
+    ...over,
+  });
+
+  it("plans only the remaining shifts, numbered as given", () => {
+    const s = buildSchedule(players, [], cfg(), seed());
+    expect(s.shifts.map((x) => x.idx)).toEqual([1, 2, 3]);
+    expect(s.shifts.every((x) => x.onIds.length === 4)).toBe(true);
+  });
+
+  it("sits out whoever has banked the most court time", () => {
+    const s = buildSchedule(
+      players,
+      [],
+      cfg(),
+      seed({ fieldSec: { ava: 900, ben: 900, cai: 0, dan: 0, eli: 0, fin: 0 } }),
+    );
+    // Cai..Fin are far behind, so they fill the court while Ava and Ben rest
+    expect(s.shifts[0].onIds.sort()).toEqual(["cai", "dan", "eli", "fin"]);
+    // totals include the banked time: Ava and Ben rest on, the rest catch up
+    const f = Object.fromEntries(s.totals.map((t) => [t.id, t.fieldSec]));
+    expect(f).toEqual({ ava: 900, ben: 900, cai: 450, dan: 450, eli: 450, fin: 450 });
+  });
+
+  it("balances by seconds across unequal shift lengths", () => {
+    const s = buildSchedule(
+      players,
+      [],
+      cfg(),
+      seed({
+        skeleton: [sk(1, 0, 100, 180), sk(2, 0, 180, 400), sk(3, 0, 400, 600)],
+        fieldSec: { ava: 400, ben: 0, cai: 0, dan: 0, eli: 0, fin: 0 },
+      }),
+    );
+    const f = s.totals.map((t) => t.fieldSec);
+    expect(Math.max(...f) - Math.min(...f)).toBeLessThanOrEqual(220);
+  });
+
+  it("keeps a game-long keeper in goal through the rest of the game", () => {
+    const gameGk: Position = { ...gk, cadence: "game" };
+    const s = buildSchedule(mkPlayers(names, { Ava: ["gk"], Ben: ["gk"] }), [gameGk], cfg(), seed({
+      prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: { gk: "ben" } },
+    }));
+    expect(s.shifts.map((x) => x.assignments.gk)).toEqual(["ben", "ben", "ben"]);
+  });
+
+  it("keeps a half-long keeper to the end of the half, then hands the role on", () => {
+    const halfGk: Position = { ...gk, cadence: "half" };
+    const s = buildSchedule(
+      mkPlayers(names, { Ava: ["gk"], Ben: ["gk"] }),
+      [halfGk],
+      cfg(),
+      seed({
+        skeleton: [sk(1, 0, 150, 300), sk(2, 1, 0, 300)],
+        prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: { gk: "ava" } },
+      }),
+    );
+    expect(s.shifts[0].assignments.gk).toBe("ava");
+    expect(s.shifts[1].assignments.gk).toBe("ben"); // Ben has the least keeper time
+  });
+
+  it("lets a half-long role lapse when the current half has no shifts left", () => {
+    const halfGk: Position = { ...gk, cadence: "half" };
+    const s = buildSchedule(
+      mkPlayers(names, { Ava: ["gk"], Ben: ["gk"] }),
+      [halfGk],
+      cfg(),
+      seed({
+        skeleton: [sk(1, 1, 0, 300)],
+        prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: { gk: "ava" } },
+        posSec: { ava: { gk: 600 } },
+      }),
+    );
+    expect(s.shifts[0].assignments.gk).toBe("ben");
+  });
+
+  it("ignores per-shift and vacant roles when seeding holders, and counts banked role time", () => {
+    const halfGk: Position = { ...gk, id: "hgk", cadence: "half" };
+    const s = buildSchedule(
+      mkPlayers(names, { Ava: ["gk", "hgk"], Ben: ["gk", "hgk"] }),
+      [gk, halfGk],
+      cfg(),
+      seed({
+        // the per-shift keeper carries nothing over; the half role is vacant
+        prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: { gk: "ava" } },
+        posSec: { ava: { gk: 150 } },
+      }),
+    );
+    expect(s.shifts[0].assignments.hgk).toBeDefined();
+    const total = s.totals.find((t) => t.id === "ava")!;
+    expect(total.posSec.gk).toBeGreaterThanOrEqual(150);
+  });
+
+  it("rolls from the current court rather than the fixed conveyor", () => {
+    const s = buildSchedule(players, [gk], cfg({ maxSwaps: 1 }), seed({
+      prev: { idx: 0, half: 0, onIds: ["ava", "ben", "cai", "dan"], assignments: { gk: "dan" } },
+      fieldSec: { ava: 300, ben: 0, cai: 150, dan: 150, eli: 0, fin: 0 },
+    }));
+    const before = new Set(["ava", "ben", "cai", "dan"]);
+    // at most one change per shift, and the keeper is the last to be rotated off
+    expect(s.shifts[0].onIds.filter((id) => !before.has(id))).toHaveLength(1);
+    expect(s.shifts[0].onIds).toContain("dan");
+    expect(s.shifts[0].onIds).not.toContain("ava"); // most court time goes first
+    s.shifts.forEach((x, i) => {
+      const prev = new Set(i ? s.shifts[i - 1].onIds : before);
+      expect(x.onIds.filter((id) => !prev.has(id)).length).toBeLessThanOrEqual(1);
+    });
+  });
+
+  it("returns no shifts but full totals when nothing is left to play", () => {
+    const s = buildSchedule(players, [], cfg(), seed({ skeleton: [], fieldSec: { ava: 600 } }));
+    expect(s.shifts).toEqual([]);
+    expect(s.totals.find((t) => t.id === "ava")!.fieldSec).toBe(600);
+  });
+});
+
+describe("shift timeline", () => {
+  const c = (over: Partial<GameConfig> = {}): GameConfig => cfg(over);
+  const span = (t: Skeleton[]): string[] => t.map((x) => `${x.half}:${x.startSec}-${x.endSec}${x.carry ? "c" : ""}`);
+
+  it("uses the set shift length exactly, with a shorter shift at the end", () => {
+    expect(shiftSeconds(c({ shiftLength: 3 }))).toBe(180);
+    const t = planTimeline(c({ halves: 1, shiftLength: 3 }), 0, 0, 0);
+    expect(span(t)).toEqual(["0:0-180", "0:180-360", "0:360-540", "0:540-600"]);
+  });
+
+  it("never plans a shift under 30 seconds", () => {
+    expect(shiftSeconds(c({ shiftLength: 0.1 }))).toBe(30);
+  });
+
+  it("resumes a shift cut by half time at the start of the next half", () => {
+    const t = planTimeline(c({ shiftLength: 3 }), 0, 0, 0);
+    expect(span(t)).toEqual([
+      "0:0-180", "0:180-360", "0:360-540", "0:540-600",
+      "1:0-120c", "1:120-300", "1:300-480", "1:480-600",
+    ]);
+    expect(t[3].carryOverSec).toBe(120);
+    expect(t[4].carryOverSec).toBeUndefined();
+    expect(t.map((x) => x.idx)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it("does not carry when a shift ends exactly on the half, nor after the last half", () => {
+    const t = planTimeline(c({ shiftLength: 2.5 }), 0, 0, 0);
+    expect(t).toHaveLength(8);
+    expect(t.some((x) => x.carry || x.carryOverSec)).toBe(false);
+    const last = planTimeline(c({ halves: 1, shiftLength: 4 }), 0, 0, 0);
+    expect(span(last)).toEqual(["0:0-240", "0:240-480", "0:480-600"]);
+    expect(last[2].carryOverSec).toBeUndefined();
+  });
+
+  it("starts mid-half and with a carried shift owed", () => {
+    expect(span(planTimeline(c({ halves: 2, shiftLength: 3 }), 5, 0, 500))).toEqual([
+      "0:500-600", "1:0-80c", "1:80-260", "1:260-440", "1:440-600",
+    ]);
+    const owed = planTimeline(c({ shiftLength: 3 }), 4, 1, 0, 120);
+    expect(span(owed)[0]).toBe("1:0-120c");
+    expect(owed[0].idx).toBe(4);
+  });
+
+  it("lets a shift longer than the half span the break", () => {
+    const t = planTimeline(c({ shiftLength: 12 }), 0, 0, 0);
+    expect(span(t)).toEqual(["0:0-600", "1:0-120c", "1:120-600"]);
+    expect(t[0].carryOverSec).toBe(120);
+  });
+
+  it("returns nothing when asked to start past the last half", () => {
+    expect(planTimeline(c(), 9, 2, 0)).toEqual([]);
+  });
+});
+
+describe("buildSchedule with a shift resumed after half time", () => {
+  const six = mkPlayers(["Ava", "Ben", "Cai", "Dan", "Eli", "Fin"], {
+    Ava: ["gk"],
+    Ben: ["gk"],
+    Cai: ["gk"],
+  });
+  const c3 = cfg({ shiftLength: 3 });
+
+  it("keeps the same players (and per-shift keeper) across the break", () => {
+    const s = buildSchedule(six, [gk], c3);
+    const cut = s.shifts[3];
+    const resumed = s.shifts[4];
+    expect(cut.carryOverSec).toBe(120);
+    expect(resumed.carry).toBe(true);
+    expect(resumed.onIds.sort()).toEqual([...cut.onIds].sort());
+    expect(resumed.restingIds.sort()).toEqual([...cut.restingIds].sort());
+    expect(resumed.assignments).toEqual(cut.assignments);
+    // the keeper then changes for the next real shift
+    expect(s.shifts[5].carry).toBeUndefined();
+  });
+
+  it("splits court time to within one shift despite the short shifts", () => {
+    const s = buildSchedule(six, [gk], c3);
+    const f = s.totals.map((t) => t.fieldSec);
+    expect(total(s.totals)).toBe(4 * 1200);
+    expect(Math.max(...f) - Math.min(...f)).toBeLessThanOrEqual(180);
+  });
+
+  it("changes a per-half keeper in place at the break", () => {
+    const halfGk: Position = { ...gk, cadence: "half" };
+    const s = buildSchedule(six, [halfGk], c3);
+    const cut = s.shifts[3];
+    const resumed = s.shifts[4];
+    expect(resumed.onIds.sort()).toEqual([...cut.onIds].sort());
+    expect(resumed.assignments.gk).not.toBe(cut.assignments.gk);
+    expect(resumed.onIds).toContain(resumed.assignments.gk);
+  });
+
+  it("keeps a game-long keeper through the break", () => {
+    const gameGk: Position = { ...gk, cadence: "game" };
+    const s = buildSchedule(six, [gameGk], c3);
+    expect(new Set(s.shifts.map((x) => x.assignments.gk)).size).toBe(1);
+  });
+
+  it("keeps the conveyor window still through the break", () => {
+    const all = mkPlayers(["Ava", "Ben", "Cai", "Dan", "Eli", "Fin", "Gus"], {
+      Ava: ["gk"], Ben: ["gk"], Cai: ["gk"], Dan: ["gk"], Eli: ["gk"], Fin: ["gk"], Gus: ["gk"],
+    });
+    const s = buildSchedule(all, [gk], cfg({ shiftLength: 3, maxSwaps: 1 }));
+    expect(s.shifts[4].carry).toBe(true);
+    expect(s.shifts[4].onIds).toEqual(s.shifts[3].onIds);
+    expect(s.shifts[4].assignments).toEqual(s.shifts[3].assignments);
+    expect(s.shifts[5].onIds).not.toEqual(s.shifts[4].onIds);
+  });
+
+  it("holds the rolling line-up through the break too", () => {
+    const s = buildSchedule(six, [gk], cfg({ shiftLength: 3, maxSwaps: 1 }));
+    const cut = s.shifts.find((x) => x.carryOverSec)!;
+    const resumed = s.shifts[cut.idx + 1];
+    expect(resumed.onIds.sort()).toEqual([...cut.onIds].sort());
+  });
+
+  it("rebalances a resumed shift together with the one it continues", () => {
+    // 7 players, shifts that leave a short remainder: the two halves of a cut
+    // shift must always have identical line-ups after balancing
+    const seven = mkPlayers(["Ava", "Ben", "Cai", "Dan", "Eli", "Fin", "Gus"]);
+    for (const seed of [0, 1, 2, 3, 4, 5]) {
+      const s = buildSchedule(seven, [], cfg({ shiftLength: 3, seed }));
+      s.shifts.forEach((x, i) => {
+        if (x.carry) expect(x.onIds.sort()).toEqual([...s.shifts[i - 1].onIds].sort());
+      });
+      const f = s.totals.map((t) => t.fieldSec);
+      expect(Math.max(...f) - Math.min(...f)).toBeLessThanOrEqual(180);
+    }
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Store, seedState, defaultState, uniqueTeamName, LS_KEY } from "./store";
+import { pendingSubs } from "./game";
 import type { GameConfig } from "./types";
 
 const cfg: GameConfig = {
@@ -224,12 +225,6 @@ describe("planning & live game", () => {
     store.setRunning(true);
     expect(store.live!.running).toBe(true);
 
-    store.shiftBy(-5);
-    expect(store.live!.manualShift).toBe(0); // clamped low
-    store.shiftBy(999);
-    expect(store.live!.manualShift).toBe(store.live!.schedule.shifts.length - 1);
-    store.shiftBy(-999);
-
     // our goal by a named scorer
     const scorer = store.live!.players[0].id;
     store.addGoal("us", scorer);
@@ -296,21 +291,95 @@ describe("planning & live game", () => {
     expect(sh().assignments["bogus-position"]).toBeUndefined();
   });
 
-  it("nextHalf leaves the manual shift alone when the next half has no shifts", () => {
+  it("nextHalf resumes the running shift with the same players", () => {
+    const { store } = populated();
+    store.generatePlan({ ...cfg, shiftLength: 3 }); // 10:00 halves: a 1:00 shift is cut at half time
+    store.startGame();
+    const g = store.live!;
+    const last = g.schedule.shifts.filter((sh) => sh.half === 0).at(-1)!;
+    g.manualShift = last.idx;
+    expect(last.carryOverSec).toBe(120);
+    expect(store.nextHalf()).toBe(true);
+    const resumed = store.live!.schedule.shifts[store.live!.manualShift];
+    expect(resumed).toMatchObject({ half: 1, carry: true, startSec: 0, endSec: 120 });
+    expect(resumed.onIds).toEqual(last.onIds);
+  });
+
+  it("confirms subs one at a time, rebalances, and can undo", () => {
+    const { store } = populated();
+    store.generatePlan({ ...cfg, maxSwaps: 2 });
+    store.startGame();
+    store.setRunning(true);
+    expect(store.undoSub()).toBe(false); // nothing confirmed yet
+    store.confirmAllSubs();
+    expect(store.live!.manualShift).toBe(1);
+    expect(store.undoSub()).toBe(true);
+    expect(store.live!.manualShift).toBe(0);
+
+    const g = store.live!;
+    const first = g.schedule.shifts[1].onIds.find((id) => !g.schedule.shifts[0].onIds.includes(id))!;
+    store.confirmSub("nobody", first); // not a pending sub: ignored
+    expect(g.undoSub).toBeUndefined();
+    const sh0 = g.schedule.shifts[0];
+    const rows = pendingSubs(g);
+    expect(rows).toHaveLength(2);
+    store.confirmSub(rows[0].offId, rows[0].onId);
+    expect(store.live!.manualShift).toBe(0);
+    expect(sh0.onIds).toContain(rows[0].onId);
+    store.confirmSub(rows[1].offId, rows[1].onId);
+    expect(store.live!.manualShift).toBe(1);
+    store.confirmAllSubs(); // nothing pending on a fresh shift is fine too
+  });
+
+  it("does nothing on confirmAllSubs when no sub is pending", () => {
     const { store } = populated();
     store.generatePlan(cfg);
     store.startGame();
-    store.live!.schedule.shifts = store.live!.schedule.shifts.filter((sh) => sh.half === 0);
-    const before = store.live!.manualShift;
+    store.live!.manualShift = store.live!.schedule.shifts.filter((s) => s.half === 0).length - 1;
+    const before = JSON.stringify(store.live);
+    store.confirmAllSubs();
+    expect(JSON.stringify(store.live)).toBe(before);
+  });
+
+  it("saves the time actually played when the game finishes", () => {
+    const { store } = populated();
+    store.generatePlan(cfg);
+    store.startGame();
+    store.live!.played = {};
+    store.live!.players.forEach((p) => (store.live!.played![p.id] = { fieldSec: 100, posSec: {} }));
+    store.finishGame();
+    const saved = store.state.games[0];
+    expect(saved.schedule.totals.every((t) => t.fieldSec === 100)).toBe(true);
+    expect(saved.undoSub).toBeUndefined();
+  });
+
+  it("plans and starts a timer-per-player game", () => {
+    const { store } = populated();
+    expect(store.generatePlan({ ...cfg, shiftLength: 3, perPlayer: true })).toBe(true);
+    expect(store.state.plan!.schedule.shifts).toHaveLength(2); // one line-up per half
+    expect(store.state.plan!.schedule.totals.every((t) => t.fieldSec === 800)).toBe(true);
+    store.startGame();
+    const g = store.live!;
+    expect(Object.keys(g.timers!)).toHaveLength(6);
+    const sh = g.schedule.shifts[0];
+    const [out, inn] = [sh.onIds[0], sh.restingIds[0]];
+    store.swapPlayers(out, inn);
+    expect(store.live!.schedule.shifts[0].onIds).toContain(inn);
+    expect(store.undoSub()).toBe(true);
+    expect(store.live!.schedule.shifts[0].onIds).toContain(out);
+    // half time carries the court over
+    const court = [...store.live!.schedule.shifts[0].onIds];
     expect(store.nextHalf()).toBe(true);
-    expect(store.live!.currentHalf).toBe(1);
-    expect(store.live!.manualShift).toBe(before);
+    expect(store.live!.schedule.shifts[store.live!.manualShift].onIds).toEqual(court);
   });
 
   it("guards live actions when no game is running", () => {
     const store = new Store();
+    store.swapPlayers("a", "b");
     store.setRunning(true); // no-op
-    store.shiftBy(1);
+    store.confirmSub("a", "b");
+    store.confirmAllSubs();
+    expect(store.undoSub()).toBe(false);
     store.addGoal("us", null);
     store.undoLastEvent();
     expect(store.nextHalf()).toBe(false);

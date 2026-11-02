@@ -38,23 +38,23 @@ describe("suggestShift", () => {
     expect(e.min).toBe(e.max);
   });
 
-  it("gives a perfectly fair pick for 6 players and reports the honest interval", () => {
+  it("finds an exact-length perfectly fair interval for 6 players", () => {
     const s = suggestShift(6, 4, 2, 10)!;
     expect(s.perfectlyFair).toBe(true);
+    expect(Math.round(s.shiftLength * 60)).toBe(200); // 3:20, three exact shifts per half
     expect(s.shiftsPerHalf).toBe(3);
-    expect(s.shiftLength).toBe(3.5); // 3 shifts of 3:20 -> display the closest 30s value
     const e = engineSpread(6, 4, 2, 10, s.shiftLength);
-    expect(e.min).toBe(e.max); // 3 shifts/half => 24 slots / 6 = exactly even
+    expect(e.min).toBe(e.max);
+    expect(e.min).toBe(s.minCourtSec);
   });
 
-  it("balances fairness and cadence when no interval is perfect (9 players)", () => {
-    const s = suggestShift(9, 4, 2, 10)!;
-    // no 30s interval divides evenly, so it is not perfect, but stays reasonable
+  it("balances fairness and cadence when no interval is perfect (7 players)", () => {
+    const s = suggestShift(7, 4, 2, 10)!;
     expect(s.perfectlyFair).toBe(false);
-    expect(s.shiftLength).toBe(1.5); // every 1:30, not the chaotic 0:30
-    expect(s.shiftsPerHalf).toBe(7);
-    const e = engineSpread(9, 4, 2, 10, s.shiftLength);
-    expect(e.max - e.min).toBe(s.maxCourtSec - s.minCourtSec);
+    expect(s.shiftLength).toBeGreaterThanOrEqual(1.5); // not the chaotic 0:30
+    const e = engineSpread(7, 4, 2, 10, s.shiftLength);
+    expect([e.min, e.max]).toEqual([s.minCourtSec, s.maxCourtSec]);
+    expect(e.max - e.min).toBeLessThanOrEqual(60);
   });
 
   it("flags when everyone plays the whole game (present <= court size)", () => {
