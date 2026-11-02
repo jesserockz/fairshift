@@ -1,6 +1,7 @@
 import { View } from "./base";
 import { store } from "../store";
-import { clampNum, esc, fmtClock, fmtMin } from "../format";
+import { clampNum, esc, fmtClock, fmtMin, fmtMinSec, parseMinutes } from "../format";
+import { planTimeline, shiftSeconds } from "../rotation";
 import { toast } from "./ui";
 import { openShareModal } from "./share-ui";
 import { suggestShift } from "../suggest";
@@ -121,14 +122,27 @@ export class SetupView extends View {
       <div class="grid2">
         <label class="field"><span>On court (incl. positions)</span><input type="number" id="cfgField" min="1" max="15" value="${this.cfg.fieldSize}" /></label>
         <label class="field"><span>Number of halves</span><input type="number" id="cfgHalves" min="1" max="4" value="${this.cfg.halves}" /></label>
-        <label class="field"><span>Half length (min)</span><input type="number" id="cfgHalfLen" min="1" max="60" value="${this.cfg.halfLength}" /></label>
-        <label class="field"><span>Sub every (min)</span><input type="number" id="cfgShift" min="0.5" max="30" step="0.5" value="${this.cfg.shiftLength}" /></label>
-        <label class="field"><span>Subs at once (0 = auto)</span><input type="number" id="cfgSwaps" min="0" max="15" step="1" value="${this.cfg.maxSwaps ?? 0}" /></label>
+        <label class="field"><span>Half length (m:ss)</span><input type="text" id="cfgHalfLen" placeholder="10:00" autocomplete="off" value="${fmtMinSec(this.cfg.halfLength)}" /></label>
+        <label class="field"><span>${this.cfg.perPlayer ? "Stint per player (m:ss)" : "Sub every (m:ss)"}</span><input type="text" id="cfgShift" placeholder="2:30" autocomplete="off" value="${fmtMinSec(this.cfg.shiftLength)}" /></label>
+        <label class="field"><span>Subs at once (0 = auto)</span><input type="number" id="cfgSwaps" min="0" max="15" step="1" value="${this.cfg.maxSwaps ?? 0}"${this.cfg.perPlayer ? " disabled" : ""} /></label>
       </div>
+      ${
+        this.cfg.perPlayer
+          ? `<label class="field"><span>First sub no sooner than (m:ss, blank = automatic)</span><input type="text" id="cfgFirst" placeholder="auto" autocomplete="off" value="${this.cfg.firstStint ? fmtMinSec(this.cfg.firstStint) : ""}" /></label>`
+          : ""
+      }
       <div class="row" style="margin:-2px 0 10px">
+        <span class="toggle ${this.cfg.perPlayer ? "on" : ""}" id="cfgPerPlayer">Timer per player</span>
+        <div class="hint" style="margin:0;flex:1">${this.cfg.perPlayer ? "Each player gets their own timer; subs are made one at a time as each runs out." : "Off: everyone is subbed together on a shared shift timer."}</div>
+      </div>
+      ${
+        this.cfg.perPlayer
+          ? ""
+          : `<div class="row" style="margin:-2px 0 10px">
         <button class="sm" id="btnSuggest">Suggest fairest sub timer</button>
         <div class="hint" id="suggestHint" style="margin:0;flex:1"></div>
-      </div>
+      </div>`
+      }
       <label class="field"><span>Opponent (optional)</span><input type="text" id="cfgOpponent" placeholder="e.g. River Rats" value="${esc(this.cfg.opponent)}" /></label>
       <button class="primary block" id="btnGenerate">Build fair rotation</button>
       <div class="hint" id="setupSummary"></div>
@@ -142,9 +156,13 @@ export class SetupView extends View {
     this.cfg = {
       fieldSize: clampNum(this.q("cfgField").value, 1, 15, 4),
       halves: clampNum(this.q("cfgHalves").value, 1, 4, 2),
-      halfLength: clampNum(this.q("cfgHalfLen").value, 0.5, 60, 10),
-      shiftLength: clampNum(this.q("cfgShift").value, 0.5, 30, 2.5),
+      halfLength: clampNum(parseMinutes(this.q("cfgHalfLen").value) ?? NaN, 0.5, 60, 10),
+      shiftLength: clampNum(parseMinutes(this.q("cfgShift").value) ?? NaN, 0.5, 30, 2.5),
       maxSwaps: clampNum(this.q("cfgSwaps").value, 0, 15, 0),
+      perPlayer: this.cfg.perPlayer,
+      firstStint: this.cfg.perPlayer
+        ? clampNum(parseMinutes(this.querySelector<HTMLInputElement>("#cfgFirst")?.value ?? "") ?? 0, 0, 30, 0)
+        : 0,
       opponent: this.q("cfgOpponent").value.trim(),
       seed: 0,
     };
@@ -164,7 +182,7 @@ export class SetupView extends View {
       if (hint) hint.textContent = "Add players first to suggest a timer.";
       return;
     }
-    this.q("cfgShift").value = String(s.shiftLength);
+    this.q("cfgShift").value = fmtMinSec(s.shiftLength);
     this.readInputs();
     this.updateSummary();
 
@@ -189,11 +207,21 @@ export class SetupView extends View {
     let msg = `${present} present, ${this.cfg.fieldSize} on court, ${total} min total. `;
     if (present < this.cfg.fieldSize) msg += `Need at least ${this.cfg.fieldSize} present.`;
     else msg += `Target ~${((this.cfg.fieldSize * total) / present).toFixed(1)} min each on court.`;
-    // Actual shift length: the half is split into a whole number of equal shifts.
-    const halfSec = this.cfg.halfLength * 60;
-    const nShifts = Math.max(1, Math.round(halfSec / Math.max(30, this.cfg.shiftLength * 60)));
-    const actualSec = Math.round(halfSec / nShifts);
-    msg += ` Subs every ${fmtClock(actualSec)} (${nShifts} shifts/half).`;
+    if (this.cfg.perPlayer) {
+      msg += ` Each player plays a ${fmtClock(shiftSeconds(this.cfg))} stint, then the fairest bench player comes on.`;
+      if (this.cfg.firstStint) msg += ` The first sub is due after ${fmtClock(this.cfg.firstStint * 60)}.`;
+    } else {
+      // Shifts run for exactly the time set; half time cuts one short and it resumes after.
+      const timeline = planTimeline(this.cfg, 0, 0, 0);
+      msg += ` Subs every ${fmtClock(shiftSeconds(this.cfg))}`;
+      const last = timeline[timeline.length - 1];
+      if (last && last.dur < shiftSeconds(this.cfg) - 1e-6 && !last.carry) {
+        msg += `, the last shift of the game is ${fmtClock(last.dur)}`;
+      }
+      msg += timeline.some((sk) => sk.carryOverSec)
+        ? ". A shift cut by half time carries on after the break."
+        : ".";
+    }
     const el = this.querySelector("#setupSummary");
     if (el) el.textContent = msg;
     const rc = this.querySelector("#rosterCount");
@@ -226,14 +254,26 @@ export class SetupView extends View {
     this.wirePositions();
     this.wirePlayers();
 
-    ["cfgField", "cfgHalves", "cfgHalfLen", "cfgShift", "cfgSwaps", "cfgOpponent"].forEach((id) => {
-      this.q(id).oninput = () => {
+    // tidy what was typed ("2.5" -> "2:30") once the box is left
+    this.q("cfgHalfLen").onchange = () => (this.q("cfgHalfLen").value = fmtMinSec(this.cfg.halfLength));
+    this.q("cfgShift").onchange = () => (this.q("cfgShift").value = fmtMinSec(this.cfg.shiftLength));
+
+    ["cfgField", "cfgHalves", "cfgHalfLen", "cfgShift", "cfgSwaps", "cfgOpponent", "cfgFirst"].forEach((id) => {
+      const el = this.querySelector<HTMLInputElement>("#" + id);
+      if (!el) return;
+      el.oninput = () => {
         this.readInputs();
         this.updateSummary();
       };
     });
 
-    this.querySelector<HTMLButtonElement>("#btnSuggest")!.onclick = () => this.suggest();
+    this.querySelector<HTMLElement>("#cfgPerPlayer")!.onclick = () => {
+      this.readInputs();
+      this.cfg.perPlayer = !this.cfg.perPlayer;
+      this.render();
+    };
+    const suggestBtn = this.querySelector<HTMLButtonElement>("#btnSuggest");
+    if (suggestBtn) suggestBtn.onclick = () => this.suggest();
 
     this.querySelector<HTMLButtonElement>("#btnGenerate")!.onclick = () => {
       this.readInputs();

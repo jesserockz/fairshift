@@ -145,6 +145,7 @@ th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: upp
 .nexthero .bigclock { font-size: 52px; line-height: 1.05; }
 .nexthero.imminent .label { color: var(--gk); }
 .nexthero.imminent .bigclock { color: var(--gk); }
+.nexthero.overdue .label, .nexthero.overdue .bigclock { color: var(--them); }
 .progress { height: 8px; background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
 .progress .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .4s linear; }
 .progress .bar.imminent { background: linear-gradient(90deg, #b45309, var(--gk)); }
@@ -153,8 +154,14 @@ th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: upp
 .subrow .in { flex: 1; text-align: right; font-weight: 800; font-size: 17px; color: var(--us); }
 .subrow .out { flex: 1; text-align: left; font-weight: 800; font-size: 17px; color: var(--them); }
 .subrow .arrow { font-size: 15px; line-height: 1; flex: 0 0 auto; }
+.subrow.tappable { cursor: pointer; }
+.subrow .done { flex: 0 0 auto; font-size: 11px; font-weight: 800; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
 .subrow.role { background: rgba(245,158,11,.08); border-color: rgba(245,158,11,.35); }
 .subrow .tag { font-size: 11px; font-weight: 800; color: var(--gk); background: rgba(245,158,11,.15); border: 1px solid rgba(245,158,11,.4); border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+.chip .stint { font-variant-numeric: tabular-nums; font-weight: 800; font-size: 13px; color: var(--muted); }
+.chip.due { border-color: rgba(239,68,68,.7); }
+.chip.due .stint { color: var(--them); }
+.chip.bench { opacity: .85; }
 .chip.leaving { border-color: rgba(239,68,68,.55); }
 .chip.leaving .role { color: var(--them); }
 .chip.tappable { cursor: pointer; }

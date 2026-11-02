@@ -4,6 +4,7 @@ import type {
   GameConfig,
   GoalTeam,
   LiveGame,
+  Shift,
   Player,
   Position,
   PositionCadence,
@@ -11,9 +12,20 @@ import type {
   Team,
 } from "./types";
 import { uid, todayStr } from "./format";
-import { buildSchedule } from "./rotation";
+import { buildSchedule, buildStintPlan } from "./rotation";
 import { countGoals } from "./stats";
-import { currentShift, keeperId } from "./game";
+import {
+  confirmAllSubs,
+  confirmSub,
+  currentShift,
+  keeperId,
+  pendingSubs,
+  playedTotals,
+  rebalanceForNextHalf,
+  startStints,
+  swapPlayers,
+  undoLastSub,
+} from "./game";
 
 export const LS_KEY = "fairshift.v1";
 
@@ -302,7 +314,9 @@ export class Store {
       positionIds: [...p.positionIds],
     }));
     const positions = t.positions.map((p) => ({ ...p }));
-    const schedule = buildSchedule(players, positions, cfg);
+    const schedule = cfg.perPlayer
+      ? buildStintPlan(players, positions, cfg)
+      : buildSchedule(players, positions, cfg);
     this.update((s) => {
       s.plan = {
         teamId: t.id,
@@ -346,6 +360,7 @@ export class Store {
         manualShift: plan.schedule.shifts[0].idx, // >= 1 shift always exists
         events: [],
       };
+      if (plan.cfg.perPlayer) startStints(s.live);
     });
     return true;
   }
@@ -356,13 +371,42 @@ export class Store {
     });
   }
 
-  shiftBy(delta: number): void {
-    this.update((s) => {
-      const g = s.live;
-      if (!g) return;
-      const max = g.schedule.shifts.length - 1;
-      g.manualShift = Math.min(max, Math.max(0, g.manualShift + delta));
-    });
+  /**
+   * Confirm that one pending sub (identified by who goes off and on) has been
+   * made. Once the last one is in, the next shift starts and the rest of the
+   * game is re-balanced. No-op if that sub is not pending.
+   */
+  confirmSub(offId: string | null, onId: string | null): void {
+    const g = this.state.live;
+    const row = g && pendingSubs(g).find((r) => r.offId === offId && r.onId === onId);
+    if (!g || !row) return;
+    this.update(() => confirmSub(g, row));
+  }
+
+  /** Confirm every pending sub at once. */
+  confirmAllSubs(): void {
+    const g = this.state.live;
+    if (!g || !pendingSubs(g).length) return;
+    this.update(() => confirmAllSubs(g));
+  }
+
+  /**
+   * Timer-per-player mode: swap an on-court player for a bench player now.
+   * `roleTo` says who takes the outgoing player's position when the incoming
+   * player cannot (an on-court player, or null to leave it vacant).
+   */
+  swapPlayers(outId: string, inId: string, roleTo?: string | null): void {
+    const g = this.state.live;
+    if (!g) return;
+    this.update(() => swapPlayers(g, outId, inId, roleTo));
+  }
+
+  /** Take back the last confirmed sub. Returns false if there is nothing to undo. */
+  undoSub(): boolean {
+    const g = this.state.live;
+    if (!g?.undoSub) return false;
+    this.update(() => undoLastSub(g));
+    return true;
   }
 
   /** Move to the next half. Returns false if already on the last half. */
@@ -371,11 +415,12 @@ export class Store {
     if (!g || g.currentHalf + 1 >= g.cfg.halves) return false;
     this.update((s) => {
       const live = s.live as LiveGame;
+      rebalanceForNextHalf(live);
       live.currentHalf += 1;
       live.elapsedSec = 0;
       live.running = false;
-      const first = live.schedule.shifts.find((sh) => sh.half === live.currentHalf);
-      if (first) live.manualShift = first.idx;
+      const first = live.schedule.shifts.find((sh) => sh.half === live.currentHalf) as Shift;
+      live.manualShift = first.idx;
     });
     return true;
   }
@@ -434,6 +479,8 @@ export class Store {
     if (!g) return;
     const finished: FinishedGame = {
       ...g,
+      schedule: { ...g.schedule, totals: playedTotals(g) },
+      undoSub: undefined,
       running: false,
       finishedAt: new Date().toISOString(),
       result: { us: countGoals(g.events, "us"), them: countGoals(g.events, "them") },

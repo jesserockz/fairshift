@@ -23,6 +23,24 @@ export const fmtClock = (sec: number): string => {
   );
 };
 
+/**
+ * Parse a duration typed as "m:ss" (e.g. "2:30") or plain decimal minutes
+ * ("2.5", "10") into minutes. Returns null if it is not a usable duration.
+ */
+export const parseMinutes = (text: string): number | null => {
+  const t = text.trim();
+  const clock = /^(\d+):([0-5]?\d)$/.exec(t);
+  if (clock) return Number(clock[1]) + Number(clock[2]) / 60;
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  return Number(t);
+};
+
+/** Minutes to an "m:ss" string for the settings boxes ("2:30", "10:00"). */
+export const fmtMinSec = (min: number): string => {
+  const sec = Math.round(min * 60);
+  return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+};
+
 /** Seconds to a "12.5" style minute string. */
 export const fmtMin = (sec: number): string => (sec / 60).toFixed(1);
 
